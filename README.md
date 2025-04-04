@@ -34,8 +34,8 @@ git clone --depth=1 https://github.com/excellen114514/jmcomic-plugin.git ./plugi
 - jmcomic库会先把本子下载，再进行长图拼接
 
 ## TODO
-[ ] 白名单
-[ ] 咕咕咕
+- [ ] 白名单
+- [ ] 咕咕咕
 
 ## PR or Issue？
 欢迎！pr审核一般在周末审核
