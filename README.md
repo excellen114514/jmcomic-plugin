@@ -34,13 +34,12 @@ git clone --depth=1 https://github.com/excellen114514/jmcomic-plugin.git ./plugi
 - jmcomic库会先把本子下载，再进行长图拼接
 
 ## TODO
-[ ]白名单
-
-[ ]咕咕咕
+[ ] 白名单
+[ ] 咕咕咕
 
 ## PR or Issue？
 欢迎！pr审核一般在周末审核
-
+~~高中狗时间少，还请原谅呜呜呜，bug也可能神志不清就写出来了~~
 ## 许可证
 本项目使用[MIT](https://zh.wikipedia.org/zh-hk/MIT%E8%A8%B1%E5%8F%AF%E8%AD%89)作为开源许可证
 
