@@ -71,12 +71,17 @@ export class ejm extends plugin {
                 logger.error('[jm] 请求失败');
                 return await this.reply('错误，请检查车号或稍后重试！');
             }
-              if(res.status = 200) console.log('状态ok')
+              if(res.status == 200) console.log('状态ok')
               e.reply('文件拉取完成，耐心等待发送吧')
-              await e.reply(e.friend.sendFile(`././plugins/jmcomic-plugin/resources/pdf/${tup}.pdf`)) 
-              
+              if(!e.group){// 检测当前是否为群聊环境
+                 await e.reply(e.friend.sendFile(`././plugins/jmcomic-plugin/resources/pdf/${tup}.pdf`)) 
+              }else{
+                 await e.reply(e.group.fs.upload(`././plugins/jmcomic-plugin/resources/pdf/${tup}.pdf`))
+
+              }
               return true; 
             }catch(err){
+               logger.error(err)
                return await this.reply('错误，请检查车号或稍后重试！');
             }
               
@@ -112,7 +117,7 @@ export class ejm extends plugin {
          exec(`python "${ppp}"`, (error) => {
           if (error) {
             console.error(`错误码: ${error.code}`);
-            console.error(`错误信号: ${error.signal}`);
+           
             return false
           }
          
@@ -136,6 +141,7 @@ export class ejm extends plugin {
         } catch (error) {
           console.error('检查任务出错:', error);
           console.warn('执行重启');
+          e.reply('api未启动或意外关闭，执行重启')
           const JM_PATH = path.join(path.resolve(), 'plugins', 'jmcomic-plugin');
           console.log(`获取工作路径:${JM_PATH}`);
           const PY_PATH = {
@@ -147,7 +153,7 @@ export class ejm extends plugin {
            exec(`python "${ppp}"`, (error) => {
             if (error) {
               console.error(`错误码: ${error.code}`);
-              console.error(`错误信号: ${error.signal}`);
+           
               return false
             }
            
@@ -178,7 +184,7 @@ export class ejm extends plugin {
            exec(`python "${ppp}"`, (error) => {
             if (error) {
               console.error(`错误码: ${error.code}`);
-              console.error(`错误信号: ${error.signal}`);
+           
               return false
             }
            
