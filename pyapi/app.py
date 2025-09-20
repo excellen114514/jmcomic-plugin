@@ -1,49 +1,42 @@
 # app.py
 import jmcomic
-from flask import Flask, request, abort , send_file, send_from_directory
+from flask import Flask, request, abort, send_file
 import os
 import shutil
 import logging
-import schedule
-import time
 import threading
+import time
+import gc
+import psutil
+import tracemalloc
 from dotenv import load_dotenv
-import sys
-from threading import Event, Lock
 
 # 加载环境变量
 load_dotenv()
 
-# --------------------------
 # Flask 初始化
-# --------------------------
 app = Flask(__name__)
 
-# --------------------------
-# 全局配置与变量
-# --------------------------
+# 全局配置
 JM_BASE_DIR = os.getenv('JM_BASE_DIR', 'C:/a/b/your/path')
 EXCLUDE_FOLDER = os.getenv('JM_EXCLUDE_FOLDER', 'long')
 EXCLUDE_FOLDER_PDF = os.getenv('JM_EXCLUDE_FOLDER_PDF', 'pdf')
 FLASK_HOST = os.getenv('FLASK_HOST', '0.0.0.0')
 FLASK_PORT = int(os.getenv('FLASK_PORT', '8000'))
-CLEANUP_INTERVAL = int(os.getenv('CLEANUP_HOURS', '1'))
 JM_LOG_DIR = os.getenv('JM_LOG_DIR')
+MEMORY_THRESHOLD = float(os.getenv('MEMORY_THRESHOLD', '80.0'))  # 内存使用百分比阈值
+
 # 推导路径
 IMAGE_FOLDER = os.path.join(JM_BASE_DIR, 'long')
 PDF_FOLDER = os.path.join(JM_BASE_DIR, 'pdf')
-OPTION_YML_PATH = os.path.join(JM_LOG_DIR, 'option.yml')
+OPTION_YML_PATH = os.path.join(JM_LOG_DIR if JM_LOG_DIR else JM_BASE_DIR, 'option.yml')
 
-# 新增全局配置
-DOWNLOAD_RETRY_MAX = 3
-download_restart_flag = Event()
-download_lock = Lock()
+# 内存监控状态
+memory_monitor_running = True
 
-# --------------------------
 # 日志配置
-# --------------------------
 def configure_logging():
-    log_file_path = os.path.join(JM_LOG_DIR, 'app.log')
+    log_file_path = os.path.join(JM_LOG_DIR if JM_LOG_DIR else JM_BASE_DIR, 'app.log')
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(levelname)s - %(message)s',
@@ -53,158 +46,156 @@ def configure_logging():
         ]
     )
 
-# --------------------------
-# 安全下载函数
-# --------------------------
-def safe_download_album(jm_id, option):
-    """带异常捕获和自动重启的下载函数"""
-    retry = 0
-    while retry < DOWNLOAD_RETRY_MAX:
-        try:
-            with download_lock:
-                logging.info(f"开始下载专辑 {jm_id} (尝试 {retry+1}/{DOWNLOAD_RETRY_MAX})")
-                jmcomic.download_album(jm_id, option)
-                return True
-        except Exception as e:
-            logging.error(f"下载失败: {str(e)}")
-            retry += 1
-            time.sleep(5)
-    
-    logging.critical(f"专辑 {jm_id} 下载失败，已达最大重试次数")
-    download_restart_flag.set()
-    return False
-
-# --------------------------
 # 文件夹清理函数
-# --------------------------
-def delete_folders_except_imgandpdf(target_dir, exclude_folder_img, exclude_folder_pdf):
-    """带锁的清理函数"""
-    with download_lock:
-        if not os.path.exists(target_dir):
-            logging.warning(f"目录不存在: {target_dir}")
-            return
+def cleanup_folders():
+    """清理除指定文件夹外的所有目录"""
+    if not os.path.exists(JM_BASE_DIR):
+        logging.warning(f"目录不存在: {JM_BASE_DIR}")
+        return
 
-        for item in os.listdir(target_dir):
-            item_path = os.path.join(target_dir, item)
-            if os.path.isdir(item_path) and item not in [exclude_folder_img, exclude_folder_pdf]:
-                try:
-                    shutil.rmtree(item_path)
-                    logging.info(f"已删除: {item_path}")
-                except Exception as e:
-                    logging.error(f"删除失败: {item_path} - {str(e)}")
+    for item in os.listdir(JM_BASE_DIR):
+        item_path = os.path.join(JM_BASE_DIR, item)
+        if os.path.isdir(item_path) and item not in [EXCLUDE_FOLDER, EXCLUDE_FOLDER_PDF]:
+            try:
+                shutil.rmtree(item_path)
+                logging.info(f"已删除: {item_path}")
+            except Exception as e:
+                logging.error(f"删除失败: {item_path} - {str(e)}")
 
-# --------------------------
-# 定时任务
-# --------------------------
-def cleanup_job():
-    logging.info(f"开始清理 {JM_BASE_DIR}...")
-    delete_folders_except_imgandpdf(JM_BASE_DIR, EXCLUDE_FOLDER, EXCLUDE_FOLDER_PDF)
-
-def schedule_loop():
+# 下载函数
+def download_album(jm_id):
+    """下载专辑并返回是否成功"""
     try:
-        schedule.every(CLEANUP_INTERVAL).hours.do(cleanup_job)
-        while True:
-            schedule.run_pending()
-            time.sleep(60)
+        option = jmcomic.create_option_by_file(OPTION_YML_PATH)
+        jmcomic.download_album(jm_id, option)
+        return True
     except Exception as e:
-        logging.error(f"定时任务异常: {str(e)}")
-        download_restart_flag.set()
+        logging.error(f"下载失败: {str(e)}")
+        return False
 
-# --------------------------
+# 内存监控函数
+def memory_monitor():
+    """监控内存使用情况并在必要时触发垃圾回收"""
+    global memory_monitor_running
+    process = psutil.Process(os.getpid())
+    
+    # 启动内存跟踪
+    tracemalloc.start()
+    
+    while memory_monitor_running:
+        try:
+            # 获取内存使用情况
+            memory_info = process.memory_info()
+            memory_percent = process.memory_percent()
+            
+            # 记录内存使用情况
+            logging.info(f"内存使用: {memory_info.rss / 1024 / 1024:.2f} MB ({memory_percent:.2f}%)")
+            
+            # 如果内存使用超过阈值，触发垃圾回收
+            if memory_percent > MEMORY_THRESHOLD:
+                logging.warning(f"内存使用超过阈值 ({memory_percent:.2f}% > {MEMORY_THRESHOLD}%)，触发垃圾回收")
+                gc.collect()
+                
+                # 显示内存分配跟踪
+                snapshot = tracemalloc.take_snapshot()
+                top_stats = snapshot.statistics('lineno')
+                
+                logging.info("内存分配前10:")
+                for stat in top_stats[:10]:
+                    logging.info(f"  {stat}")
+                
+            # 每30秒检查一次
+            time.sleep(30)
+        except Exception as e:
+            logging.error(f"内存监控错误: {str(e)}")
+            time.sleep(60)  # 出错后等待更长时间
+
 # 路由处理
-# --------------------------
 @app.route('/jmd', methods=['GET'])
 def get_image():
-    try:
-        jm_id = request.args.get('jm', type=int)
-        if not jm_id or jm_id <= 0:
-            abort(400, description="参数 jm 必须为正整数")
+    jm_id = request.args.get('jm', type=int)
+    if not jm_id or jm_id <= 0:
+        abort(400, description="参数 jm 必须为正整数")
 
-        option = jmcomic.create_option_by_file(OPTION_YML_PATH)
-        image_path = os.path.join(IMAGE_FOLDER, f"{jm_id}.png")
+    image_path = os.path.join(IMAGE_FOLDER, f"{jm_id}.png")
 
+    if not os.path.exists(image_path):
+        if not download_album(jm_id):
+            abort(503, description="下载失败")
+        
         if not os.path.exists(image_path):
-            if not safe_download_album(jm_id, option):
-                abort(503, description="服务暂时不可用，正在自动恢复")
+            abort(404, description="资源下载后仍未找到")
 
-            if not os.path.exists(image_path):
-                abort(404, description="资源下载后仍未找到")
-
-        return send_file(image_path, mimetype='image/png')
- 
-
-    except Exception as e:
-        logging.error(f"全局异常捕获: {str(e)}")
-        if download_restart_flag.is_set():
-            restart_application()
-        abort(500, description=f"服务器错误: {str(e)}")
+    return send_file(image_path, mimetype='image/png')
 
 @app.route('/jmdp', methods=['GET'])
 def get_pdf():
-    try:
-        jm_id = request.args.get('jm', type=int)
-        if not jm_id or jm_id <= 0:
-            abort(400, description="参数 jm 必须为正整数")
+    jm_id = request.args.get('jm', type=int)
+    if not jm_id or jm_id <= 0:
+        abort(400, description="参数 jm 必须为正整数")
 
-        option = jmcomic.create_option_by_file(OPTION_YML_PATH)
-        pdf_path = os.path.join(PDF_FOLDER, f"{jm_id}.pdf")
+    pdf_path = os.path.join(PDF_FOLDER, f"{jm_id}.pdf")
 
+    if not os.path.exists(pdf_path):
+        if not download_album(jm_id):
+            abort(503, description="下载失败")
+        
         if not os.path.exists(pdf_path):
-            if not safe_download_album(jm_id, option):
-                abort(503, description="服务暂时不可用，正在自动恢复")
+            abort(404, description="资源下载后仍未找到")
 
-            if not os.path.exists(pdf_path):
-                abort(404, description="资源下载后仍未找到")
+    return send_file(pdf_path, mimetype='application/pdf')
 
-        # return send_from_directory(
-        #     PDF_FOLDER,
-        #     f"{jm_id}.pdf",
-        #     as_attachment=True
-        # )
-        return 'download!'
+@app.route('/cleanup', methods=['POST'])
+def cleanup():
+    """手动触发清理"""
+    cleanup_folders()
+    return '清理完成'
 
-    except Exception as e:
-        logging.error(f"请求处理失败: {str(e)}")
-        if download_restart_flag.is_set():
-            restart_application()
-        abort(500, description=f"服务器错误: {str(e)}")
+@app.route('/memory', methods=['GET'])
+def memory_info():
+    """获取当前内存使用信息"""
+    process = psutil.Process(os.getpid())
+    memory_info = process.memory_info()
+    memory_percent = process.memory_percent()
+    
+    return {
+        'rss_mb': memory_info.rss / 1024 / 1024,
+        'vms_mb': memory_info.vms / 1024 / 1024,
+        'percent': memory_percent
+    }
 
+@app.route('/gc', methods=['POST'])
+def trigger_gc():
+    """手动触发垃圾回收"""
+    collected = gc.collect()
+    return f'垃圾回收完成，释放了 {collected} 个对象'
 
 @app.route('/')
 def return_status():
     return 'api running!'
 
-
-# --------------------------
-# 进程管理
-# --------------------------
-def restart_application():
-    """安全重启应用"""
-    logging.critical("执行安全重启...")
-    python = sys.executable
-    os.execl(python, python, *sys.argv)
-
-# --------------------------
 # 主程序
-# --------------------------
 if __name__ == '__main__':
     configure_logging()
-    logging.info("执行首次清理...")
-    delete_folders_except_imgandpdf(JM_BASE_DIR, EXCLUDE_FOLDER, EXCLUDE_FOLDER_PDF)
+    logging.info("服务启动，执行首次清理...")
+    cleanup_folders()
     
-    threading.Thread(target=schedule_loop, daemon=True).start()
+    # 启动内存监控线程
+    monitor_thread = threading.Thread(target=memory_monitor, daemon=True)
+    monitor_thread.start()
+    logging.info("内存监控线程已启动")
     
-    # 守护循环
-    while True:
-        try:
-            app.run(
-                host=FLASK_HOST,
-                port=FLASK_PORT,
-                debug=False,
-                use_reloader=False
-            )
-        except Exception as e:
-            logging.critical(f"主进程崩溃: {str(e)}")
-            time.sleep(10)
-            continue
-        break
+    try:
+        app.run(
+            host=FLASK_HOST,
+            port=FLASK_PORT,
+            debug=False,
+            use_reloader=False
+        )
+    except KeyboardInterrupt:
+        logging.info("接收到中断信号，停止服务...")
+    finally:
+        # 停止内存监控
+        memory_monitor_running = False
+        monitor_thread.join(timeout=5)
+        logging.info("服务已停止")
